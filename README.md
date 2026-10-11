@@ -1,0 +1,102 @@
+# Qobuz BitChord Addon
+
+A TypeScript/Node.js, playback-only BitChord addon exposing `/manifest.json`, `/search`, and `/stream/:id`, plus a lightweight Qobuz TV web page at `/`.
+
+The home page is intentionally built without a frontend framework: it uses plain HTML/CSS and `XMLHttpRequest`, with large remote-friendly controls and a native audio element for older Sony Bravia/Vewd browsers.
+
+## Upstream provider
+
+The default provider uses the verified Qobuz-DL-compatible routes at `https://qobuz-dll.vercel.app/`:
+
+- `/api/get-music?q=...&offset=0` for catalogue search
+- `/api/download-music?track_id=...&quality=...` for a playable URL
+
+The provider only consumes the public JSON response, never handles Qobuz credentials, and does not expose upstream headers or URLs except for the validated playback URL returned to BitChord. It does not guess routes, scrape private APIs, extract tokens, bypass authentication, or download media.
+
+The default `QOBUZ_PROVIDER=qobuzdl` targets that public service. If the upstream returns an authorization or availability error, the addon returns a clean upstream failure rather than fabricating tracks or streams. `QOBUZ_PROVIDER=stub` remains available for local contract-only testing.
+
+## Contract
+
+- `GET /manifest.json`: stable id `com.bitchord.qobuz`, `resources: ["search", "stream"]`, `allowDownloads: 0`.
+- `GET /search?q=...&quality=...&atmos=auto`: returns `{ tracks: [] }` or normalized tracks with opaque IDs.
+- `GET /stream/:id?quality=...&atmos=auto`: returns a directly playable HTTPS rendition, or 404 when unavailable.
+- Lossless, codec, manifest, bitrate, sample rate, bit depth, and Dolby fields are only returned when the provider supplies them. Encrypted streams and malformed URLs are refused.
+
+## Local development
+
+```bash
+cp .env.example .env
+npm install
+npm run build
+npm test
+npm run dev
+curl http://localhost:3000/manifest.json
+curl 'http://localhost:3000/search?q=kind+of+blue&quality=LOSSLESS&atmos=auto'
+curl -i 'http://localhost:3000/stream/qobuz_invalid000?quality=LOSSLESS&atmos=auto'
+```
+
+Node.js 20+ is required. Environment variables are read directly by the process; use a secret manager in production rather than committing `.env`.
+
+## Provider configuration
+
+The default configuration is:
+
+```dotenv
+QOBUZ_PROVIDER=qobuzdl
+QOBUZ_UPSTREAM_BASE_URL=https://qobuz-dll.vercel.app
+```
+
+The base URL is configurable if the public service changes hostnames or you operate an authorized compatible deployment.
+
+For a different documented JSON provider, the generic adapter remains available:
+
+```dotenv
+QOBUZ_PROVIDER=http
+QOBUZ_API_BASE_URL=https://authorized.example
+QOBUZ_SEARCH_PATH=/documented/search
+QOBUZ_STREAM_PATH=/documented/stream/{id}
+QOBUZ_API_TOKEN=             # optional; never log it
+```
+
+The documented provider must return search JSON as either `{ "tracks": [...] }` or an array, with each usable track containing `upstreamId` and `title`. Stream JSON must contain an HTTPS `url`; set `manifest` to `none`, `hls`, or `dash` when applicable and set `encrypted: true` for protected media (it will be refused). The adapter sends `q`, `quality`, and `atmos`, applies timeouts, handles 404/429/5xx, and validates JSON shape. It does not expose the authorization header to BitChord clients.
+
+The server maintains a short-lived in-memory mapping from each opaque `qobuz_*` id returned by search to the provider's upstream ID; `/stream` never treats the public ID as a URL. For multiple instances, replace this cache with a shared TTL store or use sticky routing. Do not put upstream URLs or credentials in public IDs.
+
+## Production deployment
+
+Run behind an HTTPS reverse proxy or a managed HTTPS host:
+
+```bash
+npm ci
+npm run build
+NODE_ENV=production HOST=127.0.0.1 PORT=3000 npm start
+```
+
+Terminate TLS at Caddy/Nginx/a managed platform and proxy to the Node process. Set a health check to `GET /manifest.json`. Ensure the proxy preserves query strings and does not log authorization headers or signed media URLs.
+
+## Add to BitChord
+
+After deploying, copy the HTTPS root URL (for example `https://addon.example.com`) into **BitChord → Settings → Sources → Add an addon**. BitChord will request `${ROOT_URL}/manifest.json`. The addon is streaming-only because `allowDownloads` is `0`.
+
+## Example responses
+
+Manifest:
+
+```json
+{"id":"com.bitchord.qobuz","name":"Qobuz","version":"1.0.0","resources":["search","stream"],"allowDownloads":0}
+```
+
+Safe default search:
+
+```json
+{"tracks":[]}
+```
+
+Not available:
+
+```http
+HTTP/1.1 404 Not Found
+{"error":"track not available"}
+```
+
+A successful stream response is intentionally not fabricated; it is returned only after a configured provider supplies a validated authorized HTTPS rendition.
